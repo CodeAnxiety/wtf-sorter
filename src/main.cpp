@@ -4,34 +4,46 @@
 #include <fmt/format.h>
 #include <fmt/os.h>
 
-#include <cassert>
-#include <filesystem>
 #include <fstream>
-#include <iostream>
-#include <limits>
-#include <optional>
-#include <stack>
-#include <string_view>
-#include <string>
+#include <functional>
 #include <unordered_set>
-#include <tuple>
-#include <variant>
 
 using namespace app;
 namespace fs = std::filesystem;
 
 namespace
 {
+    bool less_than(std::string_view lhs, std::string_view rhs)
+    {
+        return std::lexicographical_compare(
+            lhs.begin(), lhs.end(),  //
+            rhs.begin(), rhs.end(),  //
+            [](const char & lhs, const char & rhs) {
+                return std::tolower(lhs) < std::tolower(rhs);
+            });
+    }
+
+    bool equal(const fs::path & path, std::string_view match)
+    {
+        std::string path_string = path.string();
+        return std::equal(path_string.begin(), path_string.end(),  //
+                          match.begin(), match.end(),              //
+                          [](const char & lhs, const char & rhs) {
+                              return std::tolower(lhs) == std::tolower(rhs);
+                          });
+    }
+
     class file_searcher
     {
       private:
-        std::string_view m_extension;
+        std::function<bool(const fs::path &)> m_predicate;
         std::vector<fs::path> m_files;
         std::unordered_set<std::string> m_visited;
 
       public:
-        file_searcher(const fs::path & path, std::string_view extension)
-            : m_extension(extension)
+        template <typename Predicate>
+        file_searcher(const fs::path & path, Predicate && predicate)
+            : m_predicate(predicate)
         {
             visit(path, 0);
         }
@@ -64,7 +76,7 @@ namespace
                 for (const fs::path & child : fs::directory_iterator{path})
                     visit(child, depth + 1);
             }
-            else if (path.extension() == m_extension) {
+            else if (m_predicate(path)) {
                 debug(depth + 1, "Found: {}", path);
                 m_files.emplace_back(path);
             }
@@ -157,11 +169,22 @@ namespace
         return result;
     }
 
+    std::string_view trim(std::string_view text,
+                          std::string_view characters = " \t\r\n")
+    {
+        text.remove_prefix(text.find_first_not_of(characters));
+        text.remove_suffix(text.size() - text.find_last_not_of(characters) - 1);
+        return text;
+    }
+
     std::string join(const std::vector<std::string_view> & lines,
                      std::string_view separator)
     {
         fmt::memory_buffer buffer;
         for (std::string_view line : lines) {
+            line = trim(line);
+            if (line.empty())
+                continue;
             buffer.append(line);
             buffer.append(separator);
         }
@@ -177,15 +200,7 @@ namespace
         }
 
         auto lines = split(contents.value(), "\n");
-        std::sort(
-            lines.begin(), lines.end(),
-            [](const std::string_view & lhs, const std::string_view & rhs) {
-                return std::lexicographical_compare(
-                    lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-                    [](const char & lhs, const char & rhs) {
-                        return std::tolower(lhs) < std::tolower(rhs);
-                    });
-            });
+        std::sort(lines.begin(), lines.end(), less_than);
 
         return join(lines, "\n");
     }
@@ -208,7 +223,26 @@ int main(int argc, char ** argv)
         return 1;
     }
 
-    file_searcher files{args.input_path, ".wtf"};
+    std::vector<fs::path> files;
+
+    // find .wtf files
+    {
+        file_searcher searcher{args.input_path, [](const fs::path & path) {
+                                   return equal(path.extension().string(),
+                                                ".wtf");
+                               }};
+        files.insert(files.end(), searcher.begin(), searcher.end());
+    }
+
+    // find addons.txt files
+    {
+        file_searcher searcher{args.input_path, [](const fs::path & path) {
+                                   return equal(path.filename().string(),
+                                                "addons.txt");
+                               }};
+        files.insert(files.end(), searcher.begin(), searcher.end());
+    }
+
     if (files.empty()) {
         error("No wtf files found for path: {}", args.input_path);
         return 0;
@@ -220,7 +254,7 @@ int main(int argc, char ** argv)
         verbose("[{0:>3.0f}%] {1} of {2}: {3}", ++index * percent_multipier,
                 index, files.size(), path);
         if (auto sorted = sort(path)) {
-            if (save_to_output(path, sorted.value()))
+            if (save_to_output(path, trim(sorted.value())))
                 continue;
         }
         info("Problems encountered, aborting...");
